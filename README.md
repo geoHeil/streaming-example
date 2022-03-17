@@ -301,16 +301,274 @@ for the kafka transactions.
 
 ### Spark
 
+step 1: Start spark with a connection to kafka and all the required jars enabled
+
+In particular additional the following additional packages are used:
+
+- https://github.com/AbsaOSS/ABRiS for making spark play nice with AVRO and schema registries
+- default additional packages for kafka & avro support
+
+Exception in thread "main" java.lang.IllegalArgumentException: requirement failed: Provided Maven Coordinates must be in the form 
+
+'groupId:artifactId:version'. 
+The coordinate provided is: 
+org.apache.spark:org.apache.spark:spark-sql-kafka-0-10_2.12:3.2.1
+```
+spark-shell --master 'local[4]'\
+	--repositories https://packages.confluent.io/maven \
+    --packages org.apache.spark:spark-avro_2.12:3.2.1,org.apache.spark:spark-sql-kafka-0-10_2.12:3.2.1,za.co.absa:abris_2.12:6.2.0 \
+    --conf spark.sql.shuffle.partitions=4
 
 ```
+
+In case you are using spark behind a corporate proxy use:
+
+- https://stackoverflow.com/questions/36676395/how-to-resolve-external-packages-with-spark-shell-when-behind-a-corporate-proxy
+- https://godatadriven.com/blog/spark-packages-from-a-password-protected-repository/
+
+
+Step 2: connect spark to kafka
+
+Read the raw records
+
+> HINT: for quick debuging it might be useful to turn `readStream` into the `read` function.
+
 ```
+val df = spark
+  .read
+  //.readStream
+  .format("kafka")
+  .option("kafka.bootstrap.servers", "localhost:9092")
+  //.option("startingOffsets", "earliest") // start from the beginning each time
+  .option("subscribe", "commercials_avro")
+  .load()
+
+```
+
+Take notice how the value is a binary field (AVRO):
+
+```
+df.printSchema
+root
+ |-- key: binary (nullable = true)
+ |-- value: binary (nullable = true)
+ |-- topic: string (nullable = true)
+ |-- partition: integer (nullable = true)
+ |-- offset: long (nullable = true)
+ |-- timestamp: timestamp (nullable = true)
+ |-- timestampType: integer (nullable = true)
+```
+
+Parsing the Avro (sing the Schema stored in the Schema Registry)
+
+```
+import za.co.absa.abris.config.AbrisConfig
+val abrisConfig = AbrisConfig
+  .fromConfluentAvro
+  .downloadReaderSchemaByLatestVersion
+  .andTopicNameStrategy("commercials_avro")
+  .usingSchemaRegistry("http://localhost:8081")
+
+import za.co.absa.abris.avro.functions.from_avro
+val deserialized = df.select(from_avro(col("value"), abrisConfig) as 'data).select("data.*")
+deserialized.printSchema
+
+root
+ |-- brand: string (nullable = true)
+ |-- duration: integer (nullable = true)
+ |-- rating: integer (nullable = true)
+
+
+```
+
+Step 3: switch to a streaming query 
+
+> HINT: turn `read` into the `readStream` function above.
+
+```
+val df = spark
+  .readStream
+  .format("kafka")
+  .option("kafka.bootstrap.servers", "localhost:9092")
+  .option("startingOffsets", "earliest") // start from the beginning each time
+  .option("subscribe", "commercials_avro")
+  .load()
+
+import za.co.absa.abris.config.AbrisConfig
+val abrisConfig = AbrisConfig
+  .fromConfluentAvro
+  .downloadReaderSchemaByLatestVersion
+  .andTopicNameStrategy("commercials_avro")
+  .usingSchemaRegistry("http://localhost:8081")
+
+import za.co.absa.abris.avro.functions.from_avro
+val deserialized = df.withColumn("data", from_avro(col("value"), abrisConfig))
+deserialized.printSchema
+
+root
+ |-- key: binary (nullable = true)
+ |-- value: binary (nullable = true)
+ |-- topic: string (nullable = true)
+ |-- partition: integer (nullable = true)
+ |-- offset: long (nullable = true)
+ |-- timestamp: timestamp (nullable = true)
+ |-- timestampType: integer (nullable = true)
+ |-- data: struct (nullable = true)
+ |    |-- brand: string (nullable = false)
+ |    |-- duration: integer (nullable = false)
+ |    |-- rating: integer (nullable = false)
+
+
+// in non streaming mode:
+// deserialized.groupBy("data.brand").count.show
+// in streaming mode:
+val query = deserialized.groupBy("data.brand").count.writeStream
+  .outputMode("complete")
+  .format("console")
+  .start()
+
+
+// to stop query in interactive shell and continue development
+query.stop
+// to block session
+// query.awaitTermination()
+```
+
+> NOTICE: the output modes https://spark.apache.org/docs/latest/structured-streaming-programming-guide.html#output-modes
+> 
+> - append (default): new rowas are added
+> - complete: final aggregation result
+> - update: only updates are pushed on
+
+
+outputted batch updates
+
+```
+-------------------------------------------
+Batch: 0
+-------------------------------------------
++------+-----+
+| brand|count|
++------+-----+
+|Globex|  694|
+|  Acme|  703|
++------+-----+
+
+-------------------------------------------
+Batch: 1
+-------------------------------------------
++------+-----+
+| brand|count|
++------+-----+
+|Globex|  695|
+|  Acme|  703|
++------+-----+
+```
+
+Make sure to visit http://localhost:4040/StreamingQuery/ Also look at the nice UI new in Spark 3.x
+> Tuning hint: look at the shuffle partitions! This is crucial now. I can already tell you that the default 200 are way too slow.
+![spark streaming statistics](img/spark-streaming-stats.png)
+
+
+Now back to the windowed streaming query:
+
+```
+// non streaming
+deserialized.select($"timestamp", $"data.*")
+  .withWatermark("timestamp", "10 minutes")
+  .groupBy(window($"timestamp", "5 seconds"), $"brand").count
+  .filter($"count" > 3)
+  .show(false)
+
+// streaming
+val query = deserialized.select($"timestamp", $"data.*")
+  .withWatermark("timestamp", "10 minutes")
+  .groupBy(window($"timestamp", "5 seconds"), $"brand").count
+  .filter($"count" > 3)
+  .writeStream
+  .outputMode("complete")
+  .format("console")
+  .start()
+  
+query.stop
+```
+
+> NOTICE: here additoinally https://spark.apache.org/docs/latest/structured-streaming-programming-guide.html#handling-event-time-and-late-data late arriving data is handled gracefully with the watermark (could have been added in KSQLDB as well, omitted for sake fo brevity)
+
+https://docs.databricks.com/spark/latest/structured-streaming/demo-notebooks.html#structured-streaming-demo-scala-notebook for more great examples
+
+
+FYI: See https://spark.apache.org/docs/latest/structured-streaming-programming-guide.html#rocksdb-state-store-implementation for an efficient and scalable state store implementation for large scale streaming queries.
+
+further great information:
+
+- https://medium.com/datapebbles/kafka-to-spark-structured-streaming-with-exactly-once-semantics-35e4281525fc
+- https://docs.microsoft.com/en-us/azure/hdinsight/spark/apache-spark-streaming-exactly-once
+- https://sbanerjee01.medium.com/exactly-once-processing-with-spark-structured-streaming-f2a78f45a76a
+
+Exactly once processing semantcis:
+
+- state store
+- WAL write ahead log
+- checkpoints https://spark.apache.org/docs/latest/structured-streaming-programming-guide.html#recovering-from-failures-with-checkpointing
+
+obviously both must store to a persistent volume.
+
+In case of kafka its transactional capabilities may need to be used.
+
+depending on the use-case https://tech.scribd.com/blog/2021/kafka-delta-ingest.html might be better than a generic streaming framework for streaming data ingestion into a lake.
+
+Furthermore: potentially (to easily allow for efficien full scans i.e. to avoid having one system in Kafka and one in Blog storage/lake) DELTA tables (with compaction enabled) might be cheaper when a bit more latency can be tolerated after initially sinking the data over from Kafka to a long term storage solution (using it only as a buffer).
 
 ### Flink
 
+setup as in: https://nightlies.apache.org/flink/flink-docs-release-1.14/docs/connectors/table/formats/avro-confluent/
+
 ```
+cd /usr/local/Cellar/apache-flink/1.14.4/libexec
+
+wget https://repo1.maven.org/maven2/org/apache/flink/flink-connector-kafka_2.12/1.14.4/flink-connector-kafka_2.12-1.14.4.jar -P lib/
+
+wget https://repo1.maven.org/maven2/org/apache/kafka/kafka-clients/3.0.0/kafka-clients-3.0.0.jar -P lib/
+
+wget https://repo1.maven.org/maven2/org/apache/flink/flink-avro-confluent-registry_2.12/1.14.4/flink-avro-confluent-registry_2.12-1.14.4.jar -P lib/
+wget https://repo1.maven.org/maven2/org/apache/flink/flink-avro_2.12/1.14.4/flink-avro_2.12-1.14.4.jar -P lib/
 ```
+
+```
+https://nightlies.apache.org/flink/flink-docs-release-1.14/docs/try-flink/local_installation/
+
+/bin/start-cluster.sh # one shell
+ps aux | grep flink
+
+https://nightlies.apache.org/flink/flink-docs-master/docs/dev/table/sqlclient/
+./bin/sql-client.sh #another one
+./bin/stop-cluster.sh
+```
+
+as all the kafka and other docker containers have a clashing port range with flink's default settings, please change:
+
+```
+vi conf/flink-conf.yaml
+
+# and set:
+rest.port: 8089
+```
+
+flink UI http://localhost:8089/
+
+- https://diogodssantos.medium.com/dont-leave-apache-flink-and-schema-registry-alone-77d3c2a9c787
 
 ## summary
 
 The code for this blog post is available at: XXX TODO XXX
+
+
+Furthermore, see: https://github.com/geoHeil/streaming-reference as a great example how to include NiFi and ELK for Data collection and visualization purposes.
+
+https://www.slideshare.net/SparkSummit/what-no-one-tells-you-about-writing-a-streaming-app-spark-summit-east-talk-by-mark-grover-and-ted-malaska
+
+flink HA master - spark not
+
+KSQL(db): inferior https://www.jesse-anderson.com/2019/10/why-i-recommend-my-clients-not-use-ksql-and-kafka-streams/
 
