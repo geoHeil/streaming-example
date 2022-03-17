@@ -86,7 +86,9 @@ You can either use the UI:
 
 or use the REST API to POST the user-defined schema from above to the kafka connect data generator. For this you need to set some additional properties (like how many data points should be generated):
 
-```bash
+As JSON:
+
+```
 {
   "name": "datagen-commercials-json",
   "config": {
@@ -104,6 +106,43 @@ or use the REST API to POST the user-defined schema from above to the kafka conn
 }
 ```
 
+As AVRO with the Confluent schema registry:
+
+```
+{
+  "name": "datagen-commercials-avro",
+  "config": {
+    "connector.class": "io.confluent.kafka.connect.datagen.DatagenConnector",
+    "kafka.topic": "commercials_avro",
+    "schema.string": "{\"type\":\"record\",\"name\":\"commercialrating\",\"fields\":[{\"name\":\"brand\",\"type\":{\"type\": \"string\",\"arg.properties\":{\"options\":[\"Acme\",\"Globex\"]}}},{\"name\":\"duration\",\"type\":{\"type\":\"int\",\"arg.properties\":{\"options\": [30, 45, 60]}}},{\"name\":\"rating\",\"type\":{\"type\":\"int\",\"arg.properties\":{\"range\":{\"min\":1,\"max\":5}}}}]}",
+    "schema.keyfield": "brand",
+    "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+    "value.converter": "io.confluent.connect.avro.AvroConverter",
+    "value.converter.schema.registry.url": "http://schema-registry:8081",
+    "value.converter.schemas.enable": "false",
+    "max.interval": 1000,
+    "iterations": 1000,
+    "tasks.max": "1"
+  }
+}
+```
+
+Notice how only the serializeer changes from:
+
+```
+"key.converter": "org.apache.kafka.connect.storage.StringConverter",
+"value.converter": "org.apache.kafka.connect.json.JsonConverter",
+```
+
+to:
+
+```
+"value.converter": "io.confluent.connect.avro.AvroConverter",
+"value.converter.schema.registry.url": "http://schema-registry:8081",
+```
+
+when switching over to avro
+
 Assuming you have stored this JSON snippet as a file named: `datagen-json-commercials-config.json` you can now interact with the REST API using:
 
 ```
@@ -117,6 +156,8 @@ Observe the running connector:
 But you can also check the status from the commandline:
 ```
 curl http://localhost:8083/connectors/datagen-commercials-json/status | jq
+
+curl http://localhost:8083/connectors/datagen-commercials-avro/status | jq
 ```
 
 As a sanity check you can consume some records:
@@ -124,6 +165,9 @@ As a sanity check you can consume some records:
 ```
 docker exec -it broker kafka-console-consumer --bootstrap-server localhost:9092 \
     --topic commercials_json --property print.key=true
+
+docker exec -it broker kafka-console-consumer --bootstrap-server localhost:9092 \
+    --topic commercials_avro --property print.key=true
 ```
 
 These are also available in the UI of Confluent Control Center:
@@ -141,10 +185,9 @@ Then the results are visible here:
 To stop the connector simply either delete it in the UI of the control center or use the REST API:
 
 ```
-http DELETE http://localhost:8083/connectors/datagen-commercials-json -b
+curl -X DELETE http://localhost:8083/connectors/datagen-commercials-json
 
-curl DELETE http://localhost:8083/connectors/datagen-commercials-json
-
+curl -X DELETE http://localhost:8083/connectors/datagen-commercials-avro
 ```
 
 
