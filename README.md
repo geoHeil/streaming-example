@@ -190,25 +190,127 @@ curl -X DELETE http://localhost:8083/connectors/datagen-commercials-json
 curl -X DELETE http://localhost:8083/connectors/datagen-commercials-avro
 ```
 
+In case, the AVRO format is used for serializaiton, the schema registry will showcase the schema respectively:
 
-The official quickstart is 
-first: the topic 
+![avro schema](img/avro-schema.png)
 
-```bash
-<path-to-confluent>/ksql-datagen quickstart=orders topic=orders_topic
+
+
+## Analytics
+
+In the following section I will present how to interact with the data stored in the `commercials_avro` topic using:
+
+- [KSQL](https://www.confluent.io/blog/ksql-streaming-sql-for-apache-kafka/) in version of Confluent Platform 7.0.1
+- [Spark Structured Streaming](https://spark.apache.org/docs/latest/structured-streaming-programming-guide.html) version 3.2.1
+- [Flink (SQL like table API)](https://nightlies.apache.org/flink/flink-docs-release-1.14/docs/dev/table/tableapi/) verfsion 1.14.4
+
+All tools offer the possibility for exactly once processing for a data pipeline with reads from kafka and writes to kafka (after performing a computation).
+
+### Kafka SQL
+
+The prime parameters are:
+
+- topic
+  - the original Kafka topic holding the data
+- stream
+  - unbounded: Storing a never-ending continuous flow of data
+  - immutable: New event records are append-only for the log (kafka). No modifications of existing data are perfomed
+- table
+  - bounded: Represents a snapshot of the stream at a time, and therefore the temporal limits are well defined.
+  - mutable: Any new data(`<Key, Value>` pair) that comes in is appended to the current table if the table does not have an existing entry with the same key. Otherwise, the existing record is mutated to have the latest value for that key.
+
+There is a duality between streams and tables (stream as event log composing the table, table as the snapshot point-in-time version of a stream)
+
+As a summary of the documentation found in:
+
+- https://blog.knoldus.com/ksql-streams-and-tables/
+- https://developer.confluent.io/learn-kafka/ksqldb/streams-and-tables/
+- https://www.confluent.io/blog/kafka-streams-tables-part-3-event-processing-fundamentals/
+- https://docs.ksqldb.io/en/latest/operate-and-deploy/schema-registry-integration/
+
+Step 1: create a stream from a topic:
+
+```
+CREATE OR REPLACE STREAM metrics_brand_stream
+  WITH (
+    KAFKA_TOPIC='commercials_avro',
+    VALUE_FORMAT='AVRO'
+  );
 ```
 
-## Spark
+> NOTICE: When submitting the query i.e. using the commandline or the ControlCenter UI ensure to decide if you want to start from:
+>
+> - latest: only new records will be processed
+> - earliest: all existing records are processed
 
-## Flink
+Step 2: create a materialized aggregation as a table. 
 
-## Kafka SQL
+The follwing two types of queries are available (https://docs.ksqldb.io/en/latest/concepts/queries):
+
+- push: client subscribes to a result as it changes in real-time
+- pull: emits refinements to a stream or materialized table, which enables reacting to new information in real-time
+
+A simple aggregation query can be prototyped (from the CLI or the ControlCenter UI):
+```
+SELECT brand,
+         COUNT(*) AS cnt
+  FROM metrics_brand_stream
+  GROUP BY brand
+  EMIT CHANGES;
+```
+
+and materialized as a table:
+
+```
+CREATE OR REPLACE TABLE metrics_per_brand AS
+  SELECT brand,
+         COUNT(*) AS cnt,
+         AVG(duration) AS  duration_mean,
+         AVG(rating) AS rating_mean
+  FROM metrics_brand_stream
+  GROUP BY brand
+  EMIT CHANGES;
+```
+
+The table will emit changes automatically to any downstream consumer.
+
+Perhaps a global aggregation is not desired, rather a time-based aggregation is needed.
+
+The various window types https://docs.ksqldb.io/en/latest/concepts/time-and-windows-in-ksqldb-queries/ (tumbling, hopping, session) are explained well here.
+
+
+Perhaps specific brands are of interest which are bout frequently:
+
+```
+CREATE OR REPLACE TABLE metrics_per_brand_windowed AS
+SELECT BRAND, count(*)
+FROM metrics_brand_stream
+WINDOW TUMBLING (SIZE 5 SECONDS)
+GROUP BY BRAND
+HAVING count(*) > 3;
+```
+
+Exactly once handling: https://docs.ksqldb.io/en/latest/operate-and-deploy/exactly-once-semantics/
+
+```
+SET 'processing.guarantee' = 'exactly_once';
+```
+
+Do not forget to set consumer isolation level: https://stackoverflow.com/questions/69725764/ksqldb-exactly-once-processing-guarantee
+for the kafka transactions.
+
+### Spark
+
+
+```
+```
+
+### Flink
+
+```
+```
 
 ## summary
 
 The code for this blog post is available at: XXX TODO XXX
 
-
-gou mamba
-
-heinz, manfred.

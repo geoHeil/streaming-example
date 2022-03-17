@@ -10,7 +10,7 @@
     "value.converter.schema.registry.url": "http://schema-registry:8081",
     "value.converter.schemas.enable": "false",
     "max.interval": 1000,
-    "iterations": 1000,
+    "iterations": 10000,
     "tasks.max": "1"
   }
 }
