@@ -8,6 +8,7 @@ The following two Streaming engines will be compared:
 
 - Apache Spark
 - Apache Flink
+- Kafka SQL
 
 > NOTICE: This is not meant for performance comparision. Spark i.e. does not offer an active master replication whereas flink guarantees high availability. 
 > Indeed, the resource manager will restart the Spark master - however this additional delay (depending on the use-case) might not be acceptable.
@@ -157,6 +158,8 @@ first: the topic
 ## Spark
 
 ## Flink
+
+## Kafka SQL
 
 ## summary
 
