@@ -734,6 +734,12 @@ would require custom code.
 
 ## new streaming databases
 
+new streaming databases are up-and-coming:
+
+- https://www.theseattledataguy.com/7-real-time-data-streaming-databases-which-one-is-right-for-you/#page-content
+- https://materialize.com/blog-rocksdb/
+https://blog.getdbt.com/dbt-materialize-streaming-to-a-dbt-project-near-you/ 
+
 
 materialize: https://github.com/MaterializeInc/mz-hack-day-2022
 https://www.youtube.com/watch?v=Kv9FCfZjgy0
