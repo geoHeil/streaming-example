@@ -522,28 +522,35 @@ Furthermore: potentially (to easily allow for efficien full scans i.e. to avoid 
 
 ### Flink
 
-setup as in: https://nightlies.apache.org/flink/flink-docs-release-1.14/docs/connectors/table/formats/avro-confluent/
+first steps with flink:
+https://nightlies.apache.org/flink/flink-docs-release-1.14//docs/try-flink/local_installation/
+
+setup as in: https://nightlies.apache.org/flink/flink-docs-release-1.14/docs/connectors/table/formats/avro-confluent/ 
 
 ```
-cd /usr/local/Cellar/apache-flink/1.14.4/libexec
+cd apache-flink/1.14.4/libexec
 
 wget https://repo1.maven.org/maven2/org/apache/flink/flink-connector-kafka_2.12/1.14.4/flink-connector-kafka_2.12-1.14.4.jar -P lib/
 
 wget https://repo1.maven.org/maven2/org/apache/kafka/kafka-clients/3.0.0/kafka-clients-3.0.0.jar -P lib/
 
-wget https://repo1.maven.org/maven2/org/apache/flink/flink-avro-confluent-registry_2.12/1.14.4/flink-avro-confluent-registry_2.12-1.14.4.jar -P lib/
-wget https://repo1.maven.org/maven2/org/apache/flink/flink-avro_2.12/1.14.4/flink-avro_2.12-1.14.4.jar -P lib/
+
+// https://mvnrepository.com/artifact/org.apache.flink/flink-avro-confluent-registry
+implementation 'org.apache.flink:flink-avro-confluent-registry:1.14.4'
+
+wget https://repo1.maven.org/maven2/org/apache/flink/flink-avro-confluent-registry/1.14.4/flink-avro-confluent-registry-1.14.4.jar -P lib/
+wget https://repo1.maven.org/maven2/org/apache/flink/flink-avro/1.14.4/flink-avro-1.14.4.jar -P lib/
 ```
 
 ```
 https://nightlies.apache.org/flink/flink-docs-release-1.14/docs/try-flink/local_installation/
 
-/bin/start-cluster.sh # one shell
+./bin/start-cluster.sh local # one shell
 ps aux | grep flink
 
 https://nightlies.apache.org/flink/flink-docs-master/docs/dev/table/sqlclient/
 ./bin/sql-client.sh #another one
-./bin/stop-cluster.sh
+
 ```
 
 as all the kafka and other docker containers have a clashing port range with flink's default settings, please change:
@@ -557,9 +564,192 @@ rest.port: 8089
 
 flink UI http://localhost:8089/
 
+![flink UI](img/empty_flink.png)
+
+in case it is not showing up - check the logs which are created in the log folder for any exception describing the problem.
+
 - https://diogodssantos.medium.com/dont-leave-apache-flink-and-schema-registry-alone-77d3c2a9c787
 
+
+scala shell moved 
+https://github.com/zjffdu/flink-scala-shell
+as per https://lists.apache.org/thread/pojsrrdckjwow5186nd7hn9y5j9t29ov
+
+Zeppelin https://zeppelin.apache.org/docs/latest/interpreter/flink.html has an interactive interpreter though.
+
+
+following along with https://nightlies.apache.org/flink/flink-docs-master/docs/dev/table/sqlclient/ and https://nightlies.apache.org/flink/flink-docs-release-1.14/docs/connectors/table/kafka/ and
+
+https://nightlies.apache.org/flink/flink-docs-release-1.14/docs/connectors/table/formats/avro-confluent/
+
+
+https://lists.apache.org/list.html?user@flink.apache.org
+flink SQL client with kafka confluent avro binaries setup
+
+```sql
+CREATE TABLE foo (foo string) WITH (
+    'connector' = 'kafka',
+    'topic' = 'foo',
+    'scan.startup.mode' = 'earliest-offset',
+    'format' = 'avro-confluent',
+    'avro-confluent.schema-registry.url' = 'http://localhost:8081/',
+    'properties.group.id' = 'flink-test-001',
+    'properties.bootstrap.servers' = 'localhost:9092'
+);
+SELECT * FROM foo;
+
+CREATE TABLE KafkaTable (
+  `event_time` TIMESTAMP(3) METADATA FROM 'timestamp',
+  `partition` BIGINT METADATA VIRTUAL,
+  `offset` BIGINT METADATA VIRTUAL,
+  `user_id` BIGINT,
+  `item_id` BIGINT,
+  `behavior` STRING
+) WITH (
+  'connector' = 'kafka',
+  'topic' = 'user_behavior',
+  'properties.bootstrap.servers' = 'localhost:9092',
+  'properties.group.id' = 'testGroup',
+  'scan.startup.mode' = 'earliest-offset',
+  'format' = 'csv'
+);
+
+
+|-- key: binary (nullable = true)
+ |-- value: binary (nullable = true)
+ |-- topic: string (nullable = true)
+ |-- partition: integer (nullable = true)
+ |-- offset: long (nullable = true)
+ |-- timestamp: timestamp (nullable = true)
+ |-- timestampType: integer (nullable = true)
+ |-- data: struct (nullable = true)
+ |    |-- brand: string (nullable = false)
+ |    |-- duration: integer (nullable = false)
+ |    |-- rating: integer (nullable = false)
+
+timestamp AS TO_TIMESTAMP(eventtime_string_field, 'yyyyMMddHHmmssX') 
+,WATERMARK FOR event_date AS event_date - INTERVAL '10' MINUTE
+,
+CREATE TABLE my_flink_table (
+     
+    brand string
+    ,duration int
+    ,rating int
+    
+) WITH (
+    'connector' = 'kafka',
+    'topic' = 'commercials_avro',
+    'scan.startup.mode' = 'earliest-offset',
+    'format' = 'avro-confluent',
+    'avro-confluent.schema-registry.url' = 'http://localhost:8081/',
+    'properties.group.id' = 'flink-test-001',
+    'properties.bootstrap.servers' = 'localhost:9092'
+);
+
+CREATE OR REPLACE STREAM metrics_brand_stream
+  WITH (
+    KAFKA_TOPIC='commercials_avro',
+    VALUE_FORMAT='AVRO'
+  );
+
+CREATE OR REPLACE TABLE metrics_per_brand AS
+  SELECT brand,
+         COUNT(*) AS cnt,
+         AVG(duration) AS  duration_mean,
+         AVG(rating) AS rating_mean
+  FROM metrics_brand_stream
+  GROUP BY brand
+  EMIT CHANGES;
+
+CREATE OR REPLACE TABLE metrics_per_brand_windowed AS
+SELECT BRAND, count(*)
+FROM metrics_brand_stream
+WINDOW TUMBLING (SIZE 5 SECONDS)
+GROUP BY BRAND
+HAVING count(*) > 3;
+
+CREATE TABLE metrics_brand_stream (
+
+  -- one column mapped to the Kafka raw UTF-8 key
+  the_kafka_key STRING,
+  
+  -- a few columns mapped to the Avro fields of the Kafka value
+  id STRING,
+  name STRING, 
+  email STRING
+
+) WITH (
+
+  'connector' = 'kafka',
+  'topic' = 'user_events_example1',
+  'properties.bootstrap.servers' = 'localhost:9092',
+
+  -- UTF-8 string as Kafka keys, using the 'the_kafka_key' table column
+  'key.format' = 'raw',
+  'key.fields' = 'the_kafka_key',
+
+  'value.format' = 'avro-confluent',
+  'value.avro-confluent.url' = 'http://localhost:8082',
+  'value.fields-include' = 'EXCEPT_KEY'
+)
+
+```
+
+query experimentation:
+
+```sql
+
+```
+
+result materialization (read from kafka, write to kafka):
+
+```sql
+
+```
+
+commercial example https://www.ververica.com/blog/ververica-platform-2.3-getting-started-with-flink-sql-on-ververica-platform
+
+stop the shell
+
+```
+./bin/stop-cluster.sh
+```
+
+certainly a fully fledged flink program might include:
+
+- unit tests
+- perhaps custom functionalities for triggers 
+- additional libraries for specific tasks i.e. gespatial tasks
+
+such a more realistic job should be constructed using a build tool like Gradle and the Java or Scala API of flink.
+
+Nonetheless for simple (traditional) ETL-style transformations the SQL DSL of flink (including CEP) can already be what you need.
+https://nightlies.apache.org/flink/flink-docs-master/docs/dev/table/sql/queries/match_recognize/
+
+
+Furthermore when handling multiple event types in a single topic:
+https://diogodssantos.medium.com/dont-leave-apache-flink-and-schema-registry-alone-77d3c2a9c787
+
+would require custom code.
+
+## new streaming databases
+
+
+materialize: https://github.com/MaterializeInc/mz-hack-day-2022
+https://www.youtube.com/watch?v=Kv9FCfZjgy0
+
+
+https://redpanda.com/ and pulsar
+
+
+TODO: add a working https://github.com/MaterializeInc/mz-hack-day-2022 example here (adapted to our avro stuff)
+
+using docker: https://materialize.com/docs/get-started/
+
+
 ## summary
+
+problems of batch data pipelines
 
 The code for this blog post is available at: XXX TODO XXX
 
@@ -572,3 +762,6 @@ flink HA master - spark not
 
 KSQL(db): inferior https://www.jesse-anderson.com/2019/10/why-i-recommend-my-clients-not-use-ksql-and-kafka-streams/
 
+problems of established streaming solutions
+
+brief mention of new databases + kafka alternatives
