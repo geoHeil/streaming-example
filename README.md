@@ -35,6 +35,11 @@ On OsX it might fail to start. To fix it follow the instructions in [the officia
 xattr -rd com.apple.quarantine kafkaesque-2.1.0.dmg
 ```
 
+
+TODO flink setup!
+
+TODO spark setup!
+
 ## generating dummy data
 
 I follow the `Orders` example from the official Confluent example https://docs.confluent.io/5.4.0/ksql/docs/tutorials/generate-custom-test-data.html.
@@ -271,6 +276,7 @@ CREATE OR REPLACE TABLE metrics_per_brand AS
   GROUP BY brand
   EMIT CHANGES;
 ```
+WARNING: why is the brand not part of the output? What is wrong here?
 
 The table will emit changes automatically to any downstream consumer.
 
@@ -298,6 +304,9 @@ SET 'processing.guarantee' = 'exactly_once';
 
 Do not forget to set consumer isolation level: https://stackoverflow.com/questions/69725764/ksqldb-exactly-once-processing-guarantee
 for the kafka transactions.
+
+> NOTICE: when browsing the topic which backs the KSQLDB table - the grouping key is not part of the value of the message.
+> Rather, it is stored in the key of the message.
 
 ### Spark
 
@@ -491,7 +500,124 @@ val query = deserialized.select($"timestamp", $"data.*")
   .start()
   
 query.stop
+
+// deserialized.groupBy("brand").agg(mean($"rating").alias("rating_mean"), mean($"duration").alias("duration_mean")).show
+
+val aggedDf = deserialized.withWatermark("timestamp", "10 minutes").groupBy($"data.brand").agg(mean($"data.rating").alias("rating_mean"), mean($"data.duration").alias("duration_mean"))
+
+// https://github.com/AbsaOSS/ABRiS/blob/master/documentation/confluent-avro-documentation.md
+
+import za.co.absa.abris.avro.parsing.utils.AvroSchemaUtils
+
+// generate schema for all columns in a dataframe
+val schema = AvroSchemaUtils.toAvroSchema(aggedDf)
+val schemaRegistryClientConfig = Map(AbrisConfig.SCHEMA_REGISTRY_URL -> "http://localhost:8081")
+
+import za.co.absa.abris.avro.read.confluent.SchemaManagerFactory
+val schemaManager = SchemaManagerFactory.create(schemaRegistryClientConfig)
+
+// register schema with topic name strategy
+// needed to execute once (per schema upgrade) not for each microbatch
+import org.apache.avro.Schema
+import za.co.absa.abris.avro.read.confluent.SchemaManager
+import za.co.absa.abris.avro.registry.SchemaSubject
+def registerSchema1(schema: Schema, schemaManager: SchemaManager, schemaName:String, isKey:Boolean): Int = {
+  val subject = SchemaSubject.usingTopicNameStrategy(schemaName, isKey)
+  schemaManager.register(subject, schema)
+}
+
+val schemaIDAfterRegistration = registerSchema1(schema, schemaManager, "metrics_per_brand_spark", isKey=true)
+
+val toAvroConfig4 = AbrisConfig
+    .toConfluentAvro
+    .downloadSchemaByLatestVersion
+    .andTopicNameStrategy("metrics_per_brand_spark")
+    .usingSchemaRegistry("http://localhost:8081")
+
+import za.co.absa.abris.avro.functions.to_avro
+import org.apache.spark.sql._
+import za.co.absa.abris.config.ToAvroConfig
+
+def writeDfToAvro(toAvroConfig: ToAvroConfig)(dataFrame:DataFrame) = {
+  // this is the key! need to keep the key to guarantee temporal ordering
+  val availableCols = dataFrame.columns//.drop("brand").columns
+  val allColumns = struct(availableCols.head, availableCols.tail: _*)
+  //dataFrame.select(to_avro($"brand", toAvroConfig).alias("key_brand"), to_avro(allColumns, toAvroConfig) as 'value)
+  dataFrame.select($"brand".alias("key_brand"), to_avro(allColumns, toAvroConfig) as 'value)
+}
+
+
+val aggedAsAvro = aggedDf.transform(writeDfToAvro(toAvroConfig4))
+aggedAsAvro.printSchema
+
+val keySchema = AvroSchemaUtils.toAvroSchema(aggedDf.select($"brand".alias("key_brand")), "key_brand")
+schemaManager.register(SchemaSubject.usingTopicNameStrategy("metrics_per_brand_spark", true), schema)
+
+val query = aggedAsAvro.writeStream
+    .format("kafka")
+    .option("kafka.bootstrap.servers", "localhost:9092")
+    .option("topic", "metrics_per_brand_spark")
+    .outputMode("update")
+    .option("checkpointLocation", "my_query_checkpoint_dir") // preferably on a distributed fault tolerant storage system
+    .start()
+query.stop
+
+https://spark.apache.org/docs/latest/structured-streaming-programming-guide.html#output-modes
+TODO try other output mode:
+.outputMode("update")
+query
+
+
+https://stackoverflow.com/questions/40872520/whats-the-purpose-of-kafkas-key-value-pair-based-messaging
+ Specifying the key so that all messages on the same key go to the same partition is very important for proper ordering of message processing if you will have multiple consumers in a consumer group on a topic.
+
+Without a key, two messages on the same key could go to different partitions and be processed by different consumers in the group out of order.ooo
 ```
+
+https://github.com/AbsaOSS/ABRiS/issues/291
+
+generated AVRO schema:
+
+```
+{
+  "fields": [
+    {
+      "name": "brand",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    {
+      "name": "rating_mean",
+      "type": [
+        "double",
+        "null"
+      ]
+    },
+    {
+      "name": "duration_mean",
+      "type": [
+        "double",
+        "null"
+      ]
+    }
+  ],
+  "name": "topLevelRecord",
+  "type": "record"
+}
+```
+
+complete results
+
+![spark complete result](img/spark-complete-result.png)
+
+how to consume this topic???
+
+this is only using the console:
+  .format("console")
+
+instead a kafka sink should be used!
 
 > NOTICE: here additoinally https://spark.apache.org/docs/latest/structured-streaming-programming-guide.html#handling-event-time-and-late-data late arriving data is handled gracefully with the watermark (could have been added in KSQLDB as well, omitted for sake fo brevity)
 
@@ -527,30 +653,15 @@ https://nightlies.apache.org/flink/flink-docs-release-1.14//docs/try-flink/local
 
 setup as in: https://nightlies.apache.org/flink/flink-docs-release-1.14/docs/connectors/table/formats/avro-confluent/ 
 
-```
-cd apache-flink/1.14.4/libexec
-
-wget https://repo1.maven.org/maven2/org/apache/flink/flink-connector-kafka_2.12/1.14.4/flink-connector-kafka_2.12-1.14.4.jar -P lib/
-
-wget https://repo1.maven.org/maven2/org/apache/kafka/kafka-clients/3.0.0/kafka-clients-3.0.0.jar -P lib/
-
-
-// https://mvnrepository.com/artifact/org.apache.flink/flink-avro-confluent-registry
-implementation 'org.apache.flink:flink-avro-confluent-registry:1.14.4'
-
-wget https://repo1.maven.org/maven2/org/apache/flink/flink-avro-confluent-registry/1.14.4/flink-avro-confluent-registry-1.14.4.jar -P lib/
-wget https://repo1.maven.org/maven2/org/apache/flink/flink-avro/1.14.4/flink-avro-1.14.4.jar -P lib/
-```
+notice we are using here the 2.12 edition of scala
+further notice: we add the sql-* uber jars! When not using a build tool this is super important. Otherwise you need to specify many transitive dependencies which is super cumbersome.
 
 ```
-https://nightlies.apache.org/flink/flink-docs-release-1.14/docs/try-flink/local_installation/
+cd flink-1.14.4/
 
-./bin/start-cluster.sh local # one shell
-ps aux | grep flink
 
-https://nightlies.apache.org/flink/flink-docs-master/docs/dev/table/sqlclient/
-./bin/sql-client.sh #another one
-
+wget https://repo1.maven.org/maven2/org/apache/flink/flink-sql-connector-kafka_2.12/1.14.4/flink-sql-connector-kafka_2.12-1.14.4.jar -P lib/
+wget https://repo1.maven.org/maven2/org/apache/flink/flink-sql-avro-confluent-registry/1.14.4/flink-sql-avro-confluent-registry-1.14.4.jar -P lib/
 ```
 
 as all the kafka and other docker containers have a clashing port range with flink's default settings, please change:
@@ -561,6 +672,17 @@ vi conf/flink-conf.yaml
 # and set:
 rest.port: 8089
 ```
+
+the start flink
+
+```
+./bin/start-cluster.sh local
+ps aux | grep flink
+
+./bin/sql-client.sh
+```
+
+
 
 flink UI http://localhost:8089/
 
@@ -586,55 +708,20 @@ https://nightlies.apache.org/flink/flink-docs-release-1.14/docs/connectors/table
 https://lists.apache.org/list.html?user@flink.apache.org
 flink SQL client with kafka confluent avro binaries setup
 
-```sql
-CREATE TABLE foo (foo string) WITH (
-    'connector' = 'kafka',
-    'topic' = 'foo',
-    'scan.startup.mode' = 'earliest-offset',
-    'format' = 'avro-confluent',
-    'avro-confluent.schema-registry.url' = 'http://localhost:8081/',
-    'properties.group.id' = 'flink-test-001',
-    'properties.bootstrap.servers' = 'localhost:9092'
-);
-SELECT * FROM foo;
+TODO: discuss watermarks
+https://nightlies.apache.org/flink/flink-docs-master/docs/dev/datastream/event-time/generating_watermarks/
+perhpas globally? Also triggers/the impact of watermarks
 
-CREATE TABLE KafkaTable (
-  `event_time` TIMESTAMP(3) METADATA FROM 'timestamp',
+```sql
+drop table metrics_brand_stream;
+CREATE TABLE metrics_brand_stream (
+    `event_time` TIMESTAMP(3) METADATA FROM 'timestamp',
+    --WATERMARK FOR event_time AS event_time - INTERVAL '10' MINUTE,
   `partition` BIGINT METADATA VIRTUAL,
   `offset` BIGINT METADATA VIRTUAL,
-  `user_id` BIGINT,
-  `item_id` BIGINT,
-  `behavior` STRING
-) WITH (
-  'connector' = 'kafka',
-  'topic' = 'user_behavior',
-  'properties.bootstrap.servers' = 'localhost:9092',
-  'properties.group.id' = 'testGroup',
-  'scan.startup.mode' = 'earliest-offset',
-  'format' = 'csv'
-);
-
-
-|-- key: binary (nullable = true)
- |-- value: binary (nullable = true)
- |-- topic: string (nullable = true)
- |-- partition: integer (nullable = true)
- |-- offset: long (nullable = true)
- |-- timestamp: timestamp (nullable = true)
- |-- timestampType: integer (nullable = true)
- |-- data: struct (nullable = true)
- |    |-- brand: string (nullable = false)
- |    |-- duration: integer (nullable = false)
- |    |-- rating: integer (nullable = false)
-
-timestamp AS TO_TIMESTAMP(eventtime_string_field, 'yyyyMMddHHmmssX') 
-,WATERMARK FOR event_date AS event_date - INTERVAL '10' MINUTE
-,
-CREATE TABLE my_flink_table (
-     
-    brand string
-    ,duration int
-    ,rating int
+    brand string,
+    duration int,
+    rating int
     
 ) WITH (
     'connector' = 'kafka',
@@ -646,54 +733,81 @@ CREATE TABLE my_flink_table (
     'properties.bootstrap.servers' = 'localhost:9092'
 );
 
-CREATE OR REPLACE STREAM metrics_brand_stream
-  WITH (
-    KAFKA_TOPIC='commercials_avro',
-    VALUE_FORMAT='AVRO'
-  );
+CREATE TABLE ms (
+    brand string,
+    duration DOUBLE,
+    rating DOUBLE
+    
+) WITH (
+    'connector' = 'kafka',
+    'topic' = 'commercials_avro',
+    'scan.startup.mode' = 'earliest-offset',
+    'format' = 'avro-confluent',
+    'avro-confluent.schema-registry.url' = 'http://localhost:8081/',
+    'properties.group.id' = 'flink-test-001',
+    'properties.bootstrap.servers' = 'localhost:9092'
+);
 
-CREATE OR REPLACE TABLE metrics_per_brand AS
+SELECT * FROM metrics_brand_stream;
+
+SELECT AVG(duration) AS  duration_mean, AVG(CAST(rating AS DOUBLE)) AS rating_mean FROM metrics_brand_stream;
+!! Manual type cast!!!
+SELECT AVG(duration) AS  duration_mean, AVG(rating) AS rating_mean FROM ms;
+
+SELECT brand,
+         COUNT(*) AS cnt,
+         AVG(duration) AS  duration_mean,
+         AVG(rating) AS rating_mean
+  FROM metrics_brand_stream
+  GROUP BY brand;
+
+
+DROP TABLE metrics_per_brand;
+'connector' = 'upsert-kafka',
+'connector' = 'kafka',
+CREATE TABLE metrics_per_brand (
+    brand string,
+    cnt BIGINT,
+    duration_mean DOUBLE,
+    rating_mean DOUBLE
+    ,PRIMARY KEY (brand) NOT ENFORCED
+    
+) WITH (
+    'connector' = 'upsert-kafka',
+    'topic' = 'metrics_per_brand_flink',
+    'properties.group.id' = 'flink-test-001',
+    'properties.bootstrap.servers' = 'localhost:9092',
+
+    'key.format' = 'avro-confluent',
+    'key.avro-confluent.schema-registry.subject' = 'metrics_per_brand_flink-key',
+    'key.avro-confluent.schema-registry.url' = 'http://localhost:8081/',
+
+    'value.format' = 'avro-confluent',
+    'value.avro-confluent.schema-registry.subject' = 'metrics_per_brand_flink-value',
+    'value.avro-confluent.schema-registry.url' = 'http://localhost:8081/'
+    
+);
+INSERT INTO metrics_per_brand
   SELECT brand,
          COUNT(*) AS cnt,
          AVG(duration) AS  duration_mean,
          AVG(rating) AS rating_mean
   FROM metrics_brand_stream
-  GROUP BY brand
-  EMIT CHANGES;
+  GROUP BY brand;
 
-CREATE OR REPLACE TABLE metrics_per_brand_windowed AS
-SELECT BRAND, count(*)
-FROM metrics_brand_stream
-WINDOW TUMBLING (SIZE 5 SECONDS)
-GROUP BY BRAND
-HAVING count(*) > 3;
+select * from country_target;
 
-CREATE TABLE metrics_brand_stream (
 
-  -- one column mapped to the Kafka raw UTF-8 key
-  the_kafka_key STRING,
-  
-  -- a few columns mapped to the Avro fields of the Kafka value
-  id STRING,
-  name STRING, 
-  email STRING
-
-) WITH (
-
-  'connector' = 'kafka',
-  'topic' = 'user_events_example1',
-  'properties.bootstrap.servers' = 'localhost:9092',
-
-  -- UTF-8 string as Kafka keys, using the 'the_kafka_key' table column
-  'key.format' = 'raw',
-  'key.fields' = 'the_kafka_key',
-
-  'value.format' = 'avro-confluent',
-  'value.avro-confluent.url' = 'http://localhost:8082',
-  'value.fields-include' = 'EXCEPT_KEY'
-)
-
+https://nightlies.apache.org/flink/flink-docs-release-1.14/docs/dev/datastream/fault-tolerance/checkpointing/#enabling-and-configuring-checkpointing
+SET 'state.checkpoints.dir' = 'hdfs:///my/streaming_app/checkpoints/';
+SET 'execution.checkpointing.mode' = 'EXACTLY_ONCE';
+SET 'execution.checkpointing.interval' = '30min';
+SET 'execution.checkpointing.min-pause' = '20min';
+SET 'execution.checkpointing.max-concurrent-checkpoints' = '1';
+SET 'execution.checkpointing.prefer-checkpoint-for-recovery' = 'true';
 ```
+
+https://nightlies.apache.org/flink/flink-docs-master/docs/connectors/table/upsert-kafka/
 
 query experimentation:
 
@@ -712,6 +826,10 @@ commercial example https://www.ververica.com/blog/ververica-platform-2.3-getting
 stop the shell
 
 ```
+// ./bin/taskmanager.sh start
+# to start more taskmanagers
+
+
 ./bin/stop-cluster.sh
 ```
 
@@ -731,6 +849,10 @@ Furthermore when handling multiple event types in a single topic:
 https://diogodssantos.medium.com/dont-leave-apache-flink-and-schema-registry-alone-77d3c2a9c787
 
 would require custom code.
+
+https://nightlies.apache.org/flink/flink-docs-release-1.14/docs/dev/datastream/fault-tolerance/checkpointing/#enabling-and-configuring-checkpointing
+
+exactly once needs a) checkpointing b) kafka transactions enabled
 
 ## new streaming databases
 
@@ -753,6 +875,56 @@ TODO: add a working https://github.com/MaterializeInc/mz-hack-day-2022 example h
 using docker: https://materialize.com/docs/get-started/
 
 
+```
+materialized --workers=1 # in one terminal
+
+psql -U materialize -h localhost -p 6875 materialize # in another terminal
+
+DROP SOURCE metrics_brand_stream_m;
+
+CREATE MATERIALIZED SOURCE metrics_brand_stream_m
+  FROM KAFKA BROKER 'localhost:9092' TOPIC 'commercials_avro'
+  FORMAT AVRO USING CONFLUENT SCHEMA REGISTRY 'http://localhost:8081'
+
+  INCLUDE PARTITION, OFFSET, TIMESTAMP AS ts
+  ENVELOPE NONE;
+
+
+SELECT * FROM metrics_brand_stream_m;
+SELECT brand,
+         COUNT(*) AS cnt,
+         AVG(duration) AS  duration_mean,
+         AVG(rating) AS rating_mean
+  FROM metrics_brand_stream_m
+  GROUP BY brand;
+
+CREATE MATERIALIZED VIEW metrics_per_brand_view AS
+SELECT brand,
+         COUNT(*) AS cnt,
+         AVG(duration) AS  duration_mean,
+         AVG(rating) AS rating_mean
+  FROM metrics_brand_stream_m
+  GROUP BY brand;
+
+CREATE SINK metrics_per_brand
+FROM metrics_per_brand_view
+INTO KAFKA BROKER 'localhost:9092' TOPIC 'metrics_per_brand_materialize'
+KEY (brand)
+FORMAT AVRO USING
+    CONFLUENT SCHEMA REGISTRY 'http://localhost:8081';
+```
+
+https://materialize.com/docs/guides/dbt/
+
+exactly once processing is supported.
+
+TODO add DBT example here
+
+
+https://redpanda.com/
+
+
+
 ## summary
 
 problems of batch data pipelines
@@ -767,7 +939,12 @@ https://www.slideshare.net/SparkSummit/what-no-one-tells-you-about-writing-a-str
 flink HA master - spark not
 
 KSQL(db): inferior https://www.jesse-anderson.com/2019/10/why-i-recommend-my-clients-not-use-ksql-and-kafka-streams/
+grouping keys with multiple columns: manual partitioning necessary
+https://www.confluent.io/blog/ksqldb-0-15-reads-more-message-keys-supports-more-data-types/ all steps add to latency
 
 problems of established streaming solutions
 
 brief mention of new databases + kafka alternatives
+
+
+spark abris issues + dynamic frame
