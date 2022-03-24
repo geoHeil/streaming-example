@@ -1,0 +1,15 @@
+# apply via
+# conda env create --name materialize-demo -f environment.yml
+# mamba env create --name materialize-demo -f environment.yml
+# conda activate materialize-demo
+# conda remove --name materialize-demo --all
+#name: materialize-demo
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python>=3.8
+  - pip
+  - pip:
+      - dbt-core
+      - dbt-materialize

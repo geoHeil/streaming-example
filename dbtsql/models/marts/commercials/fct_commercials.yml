@@ -1,0 +1,12 @@
+version: 2
+
+models:
+  - name: fct_commercials
+    description: ""
+    columns:
+      - name: brand
+        description: "Unique Brand name"
+      - name: rating_mean
+        description: ""
+      - name: duration_mean
+        description: ""

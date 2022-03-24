@@ -1,0 +1,12 @@
+version: 2
+
+models:
+  - name: stg_commercials_information
+    description: ""
+    columns:
+      - name: brand
+        description: "Brand"
+      - name: duration
+        description: "Duration of ad impression."
+      - name: rating
+        description: "Rating of user"

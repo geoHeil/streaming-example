@@ -1,0 +1,12 @@
+version: 2
+
+models:
+  - name: sink_commercials
+    description: "export fct_commercials view to kafka"
+    columns:
+      - name: brand
+        description: "Unique Brand name"
+      - name: rating_mean
+        description: ""
+      - name: duration_mean
+        description: ""

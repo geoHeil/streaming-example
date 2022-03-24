@@ -914,7 +914,7 @@ FORMAT AVRO USING
     CONFLUENT SCHEMA REGISTRY 'http://localhost:8081';
 ```
 
-https://materialize.com/docs/guides/dbt/
+https://materialize.com/docs/guides/dbt/ and https://docs.getdbt.com/reference/warehouse-profiles/materialize-profile
 
 exactly once processing is supported.
 
@@ -922,6 +922,39 @@ TODO add DBT example here
 
 
 https://redpanda.com/
+
+setup of dbt TODO conda
+
+
+nice example adding in Metabase for visualization: https://devdojo.com/bobbyiliev/how-to-use-dbt-with-materialize-and-redpanda
+
+```
+conda activate materialize-demo
+cd dbt
+dbt debug --config-dir
+vi /Users/geoheil/.dbt/profiles.yml
+
+paste profile file
+
+dbt debug
+
+
+if all is fine
+define the models
+
+
+dbt run
+
+
+psql -U materialize -h localhost -p 6875 materialize
+
+SHOW SOURCES;
+SHOW VIEWS;
+
+dbt docs generate
+dbt docs serve
+dbt test
+```
 
 
 
