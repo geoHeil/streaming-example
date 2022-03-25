@@ -11,7 +11,7 @@ with light transformations on top of the source.
 
 WITH source AS (
 
-    SELECT * FROM {{ ref('rp_comercials_information') }}
+    SELECT * FROM {{ ref('rp_commercials_information') }}
 
 ),
 

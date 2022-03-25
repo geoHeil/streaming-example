@@ -13,6 +13,6 @@ dbtsql:
       user: materialize
       pass: password
       dbname: materialize
-      schema: public## Generally this profiles.yml file never be included in your dbt project but rather 
+      schema: public ## Generally this profiles.yml file never be included in your dbt project but rather 
  
   target: dev

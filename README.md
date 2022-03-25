@@ -937,7 +937,7 @@ vi /Users/geoheil/.dbt/profiles.yml
 paste profile file
 
 dbt debug
-
+dbt deps # install required dependencies
 
 if all is fine
 define the models
