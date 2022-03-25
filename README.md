@@ -503,8 +503,80 @@ query.stop
 
 // deserialized.groupBy("brand").agg(mean($"rating").alias("rating_mean"), mean($"duration").alias("duration_mean")).show
 
-val aggedDf = deserialized.withWatermark("timestamp", "10 minutes").groupBy($"data.brand").agg(mean($"data.rating").alias("rating_mean"), mean($"data.duration").alias("duration_mean"))
+import spark.implicits._
 
+val aggedDf = Seq(("foo", 1.0, 1.0), ("bar", 2.0, 2.0)).toDF("brand", "rating_mean", "duration_mean")
+aggedDf.printSchema
+aggedDf.show
+
++-----+-----------+-------------+
+|brand|rating_mean|duration_mean|
++-----+-----------+-------------+
+|  foo|        1.0|          1.0|
+|  bar|        2.0|          2.0|
++-----+-----------+-------------+
+
+
+import za.co.absa.abris.avro.parsing.utils.AvroSchemaUtils
+import za.co.absa.abris.avro.read.confluent.SchemaManagerFactory
+import org.apache.avro.Schema
+import za.co.absa.abris.avro.read.confluent.SchemaManager
+import za.co.absa.abris.avro.registry.SchemaSubject
+import za.co.absa.abris.avro.functions.to_avro
+import org.apache.spark.sql._
+import za.co.absa.abris.config.ToAvroConfig
+
+
+// generate schema for all columns in a dataframe
+val valueSchema = AvroSchemaUtils.toAvroSchema(aggedDf)
+val keySchema = AvroSchemaUtils.toAvroSchema(aggedDf.select($"brand".alias("key_brand")), "key_brand")
+val schemaRegistryClientConfig = Map(AbrisConfig.SCHEMA_REGISTRY_URL -> "http://localhost:8081")
+val t = "metrics_per_brand_spark222xx"
+
+val schemaManager = SchemaManagerFactory.create(schemaRegistryClientConfig)
+
+// register schema with topic name strategy
+def registerSchema1(schemaKey: Schema, schemaValue: Schema, schemaManager: SchemaManager, schemaName:String): Int = {
+  schemaManager.register(SchemaSubject.usingTopicNameStrategy(schemaName, true), schemaKey)
+  schemaManager.register(SchemaSubject.usingTopicNameStrategy(schemaName, false), schemaValue)
+}
+registerSchema1(keySchema, valueSchema, schemaManager, t)
+
+val toAvroConfig4 = AbrisConfig
+    .toConfluentAvro
+    .downloadSchemaByLatestVersion
+    .andTopicNameStrategy(t)
+    .usingSchemaRegistry("http://localhost:8081")
+
+val toAvroConfig4Key = AbrisConfig
+    .toConfluentAvro
+    .downloadSchemaByLatestVersion
+    .andTopicNameStrategy(t, isKey = true)
+    .usingSchemaRegistry("http://localhost:8081")
+
+
+def writeDfToAvro(keyAvroConfig: ToAvroConfig, toAvroConfig: ToAvroConfig)(dataFrame:DataFrame) = {
+  // this is the key! need to keep the key to guarantee temporal ordering
+  val availableCols = dataFrame.columns//.drop("brand").columns
+  val allColumns = struct(availableCols.head, availableCols.tail: _*)
+  dataFrame.select(to_avro($"brand", keyAvroConfig).alias("key"), to_avro(allColumns, toAvroConfig) as 'value)
+  // dataFrame.select($"brand".alias("key"), to_avro(allColumns, toAvroConfig) as 'value)
+}
+
+
+val aggedAsAvro = aggedDf.transform(writeDfToAvro(toAvroConfig4Key, toAvroConfig4))
+aggedAsAvro.printSchema
+
+root
+ |-- key_brand: binary (nullable = true)
+ |-- value: binary (nullable = false)
+
+aggedAsAvro.write
+    .format("kafka")
+    .option("kafka.bootstrap.servers", "localhost:9092")
+    .option("topic", t).save()
+
+xxxxxx
 // https://github.com/AbsaOSS/ABRiS/blob/master/documentation/confluent-avro-documentation.md
 
 import za.co.absa.abris.avro.parsing.utils.AvroSchemaUtils
@@ -512,6 +584,8 @@ import za.co.absa.abris.avro.parsing.utils.AvroSchemaUtils
 // generate schema for all columns in a dataframe
 val schema = AvroSchemaUtils.toAvroSchema(aggedDf)
 val schemaRegistryClientConfig = Map(AbrisConfig.SCHEMA_REGISTRY_URL -> "http://localhost:8081")
+
+val t = "metrics_per_brand_spark222"
 
 import za.co.absa.abris.avro.read.confluent.SchemaManagerFactory
 val schemaManager = SchemaManagerFactory.create(schemaRegistryClientConfig)
@@ -526,18 +600,24 @@ def registerSchema1(schema: Schema, schemaManager: SchemaManager, schemaName:Str
   schemaManager.register(subject, schema)
 }
 
-val schemaIDAfterRegistration = registerSchema1(schema, schemaManager, "metrics_per_brand_spark", isKey=true)
+
+// schema for the data/value part
+val schemaIDAfterRegistration = registerSchema1(schema, schemaManager, t, isKey=false)
+
+// schema for the keys
+val keySchema = AvroSchemaUtils.toAvroSchema(aggedDf.select($"brand".alias("key_brand")), "key_brand")
+schemaManager.register(SchemaSubject.usingTopicNameStrategy(t, true), schema)
 
 val toAvroConfig4 = AbrisConfig
     .toConfluentAvro
     .downloadSchemaByLatestVersion
-    .andTopicNameStrategy("metrics_per_brand_spark")
+    .andTopicNameStrategy(t)
     .usingSchemaRegistry("http://localhost:8081")
 
 val toAvroConfig4Key = AbrisConfig
     .toConfluentAvro
     .downloadSchemaByLatestVersion
-    .andTopicNameStrategy("metrics_per_brand_spark", isKey = true)
+    .andTopicNameStrategy(t, isKey = true)
     .usingSchemaRegistry("http://localhost:8081")
 
 import za.co.absa.abris.avro.functions.to_avro
@@ -553,16 +633,14 @@ def writeDfToAvro(keyAvroConfig: ToAvroConfig, toAvroConfig: ToAvroConfig)(dataF
 }
 
 
-val aggedAsAvro = aggedDf.transform(writeDfToAvro(toAvroConfig4))
+val aggedAsAvro = aggedDf.transform(writeDfToAvro(toAvroConfig4Key, toAvroConfig4))
 aggedAsAvro.printSchema
 
-val keySchema = AvroSchemaUtils.toAvroSchema(aggedDf.select($"brand".alias("key_brand")), "key_brand")
-schemaManager.register(SchemaSubject.usingTopicNameStrategy("metrics_per_brand_spark", true), schema)
 
 val query = aggedAsAvro.writeStream
     .format("kafka")
     .option("kafka.bootstrap.servers", "localhost:9092")
-    .option("topic", "metrics_per_brand_spark")
+    .option("topic", t)
     .outputMode("update")
     .option("checkpointLocation", "my_query_checkpoint_dir") // preferably on a distributed fault tolerant storage system
     .start()
@@ -965,7 +1043,7 @@ dbt docs serve
 dbt test
 ```
 
-
+https://github.com/MaterializeInc/ecommerce-demo
 
 ## summary
 
