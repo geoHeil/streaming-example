@@ -7,4 +7,4 @@ SELECT brand,
          AVG(duration) AS  duration_mean,
          AVG(rating) AS rating_mean
   FROM {{ ref('stg_commercials_information') }}
-  GROUP BY brand;
+  GROUP BY brand

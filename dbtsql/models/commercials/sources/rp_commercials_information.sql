@@ -1,7 +1,7 @@
 {{ config(materialized='source') }}
 
 {% set source_name %}
-    {{ mz_generate_name('metrics_brand_stream_m') }}
+    {{ mz_generate_name('rp_commercials_information') }}
 {% endset %}
 
 CREATE SOURCE {{ source_name }}

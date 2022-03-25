@@ -534,16 +534,22 @@ val toAvroConfig4 = AbrisConfig
     .andTopicNameStrategy("metrics_per_brand_spark")
     .usingSchemaRegistry("http://localhost:8081")
 
+val toAvroConfig4Key = AbrisConfig
+    .toConfluentAvro
+    .downloadSchemaByLatestVersion
+    .andTopicNameStrategy("metrics_per_brand_spark", isKey = true)
+    .usingSchemaRegistry("http://localhost:8081")
+
 import za.co.absa.abris.avro.functions.to_avro
 import org.apache.spark.sql._
 import za.co.absa.abris.config.ToAvroConfig
 
-def writeDfToAvro(toAvroConfig: ToAvroConfig)(dataFrame:DataFrame) = {
+def writeDfToAvro(keyAvroConfig: ToAvroConfig, toAvroConfig: ToAvroConfig)(dataFrame:DataFrame) = {
   // this is the key! need to keep the key to guarantee temporal ordering
   val availableCols = dataFrame.columns//.drop("brand").columns
   val allColumns = struct(availableCols.head, availableCols.tail: _*)
-  //dataFrame.select(to_avro($"brand", toAvroConfig).alias("key_brand"), to_avro(allColumns, toAvroConfig) as 'value)
-  dataFrame.select($"brand".alias("key_brand"), to_avro(allColumns, toAvroConfig) as 'value)
+  dataFrame.select(to_avro($"brand", keyAvroConfig).alias("key_brand"), to_avro(allColumns, toAvroConfig) as 'value)
+  // dataFrame.select($"brand".alias("key_brand"), to_avro(allColumns, toAvroConfig) as 'value)
 }
 
 
@@ -939,11 +945,14 @@ paste profile file
 dbt debug
 dbt deps # install required dependencies
 
+
 if all is fine
 define the models
 
 
 dbt run
+#  dbt run --select staging
+dbt run --select commercials.sources
 
 
 psql -U materialize -h localhost -p 6875 materialize
